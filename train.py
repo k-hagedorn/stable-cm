@@ -15,6 +15,7 @@ import wandb_utils
 import logging
 from dataset import ADTDataset
 from models import SiT_models, WeightFunc
+from model_zigma import ZigMa
    
 def create_logger(logging_dir):
     """
@@ -60,8 +61,35 @@ def requires_grad(model, flag=True):
 
 
 
-def create_model(args):
-    return 0
+def create_zigma(image_size, use_fp16=False):
+    return ZigMa(
+        in_channels=3,
+        embed_dim=256,
+        depth=12,
+        img_dim=image_size,
+        patch_size=2,
+        has_text=False,
+        num_classes=-1,
+        drop_path_rate=0.1,
+        n_context_token=0,
+        d_context=0,
+        ssm_cfg=None,
+        norm_epsilon=1e-5,
+        rms_norm=True,
+        fused_add_norm=True,
+        residual_in_fp32=use_fp16,
+        initializer_cfg=None,
+        scan_type="zigzagN8",
+        video_frames=0,
+        tpe=False,  # apply temporal positional encoding for video-related task
+        device="cuda",
+        use_pe=0,
+        use_jit=True,
+        m_init=True,
+        use_checkpoint=False,
+        use_fp16=use_fp16,
+        
+    )
 
     
     
@@ -121,10 +149,11 @@ def main(args):
     
     #setting up the models for CD
     #state_dict = find_model(args.ckpt_path)
-    model = SiT_models[args.model](
-        input_size=args.image_size,
+    #model = SiT_models[args.model](
+        #input_size=args.image_size,
         #num_classes=args.num_classes
-    )
+    #)
+    model = create_zigma(args.image_size)
     pretrain_model = deepcopy(model).to(device)
     avg_model = deepcopy(model).to(device)
     
