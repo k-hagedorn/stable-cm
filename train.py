@@ -112,6 +112,12 @@ def create_logger(logging_dir):
     return logger
 
 
+def norm(input, mean, std):
+    return (input - mean) * std
+
+def unnorm(input, mean, std):
+    return (input / std) + mean
+
 def main(args):
     
     
@@ -195,18 +201,22 @@ def main(args):
     running_loss = 0
     log_steps = 0
     train_steps = 0
+    mean = th.Tensor((1.56, -0.695, 0.483, 0.729)).reshape(1, -1, 1, 1)
+    std = th.Tensor((0.5/5.27, 0.5/5.91, 0.5/4.21, 0.5/4.31)).reshape(1, -1, 1, 1)
     logger.info("Starting training")
+    latent_size = args.image_size // 8
+    zs = th.normal(mean=0.0, std=0.5, size=(local_batch_size,4,latent_size,latent_size)).to(device=model.device)
+    sample_t = train_fn.sample_t()
     for i in loader:
         
         x0 = []
         x1 = i
         x = x1[1]
         x = x.to(device)
-        #with th.no_grad():
+        with th.no_grad():
             # Map input images to latent space + normalize latents:
-            #x1 = vae.encode(x1).latent_dist.sample().mul_(0.18215)
-            #norm = torchvision.transforms.Normalize((1.56, -0.695, 0.483, 0.729),(0.5/5.27, 0.5/5.91, 0.5/4.21, 0.5/4.31))
-            #x1 = norm(x1)
+            x1 = vae.encode(x1).latent_dist.sample()
+            x1 = norm(x1, mean, std)
         r = min(1., iters/args.H)
         with th.autograd.set_detect_anomaly(True):
             loss = train_fn.train_loss(x1=x, r=r, model=model, avg_model=avg_model, weight_fn=weight_fn).mean()
@@ -215,6 +225,7 @@ def main(args):
             opt.step()
             update_ema(avg_model, model.module)
             opt.zero_grad()
+            
         running_loss += loss.item()
         log_steps += 1
         train_steps += 1
@@ -237,6 +248,18 @@ def main(args):
             running_loss = 0
             log_steps = 0
             start_time = time()
+        
+        if train_steps % args.sample_every == 0:
+                logger.info("Generating EMA samples...") # default to ode sampling
+                samples = avg_model(zs, sample_t)
+                dist.barrier()
+                samples = unnorm(samples, mean, std)
+                samples = vae.decode(samples).sample
+                out_samples = th.zeros((args.global_batch_size, 3, args.image_size, args.image_size), device=device)
+                dist.all_gather_into_tensor(out_samples, samples)
+                if args.wandb:
+                    wandb_utils.log_image(out_samples, train_steps)
+                logging.info("Generating EMA samples done.")
             
         print("completed iteration")
             
@@ -257,6 +280,7 @@ if __name__ == "__main__":
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--H", type=int, default=10000)
+    parser.add_argument("--sample-every", type=int, default=2)
     
     
     args = parser.parse_args()

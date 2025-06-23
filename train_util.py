@@ -16,7 +16,7 @@ class TrainLoop():
         self.pretrain = pretrain_model
         self.batch_size = batch_size
         self.c = c
-        self.dim = (pretrain_model.in_channels*pretrain_model.input_size**2 / self.batch_size) * th.ones((batch_size)).reshape(-1, 1, 1, 1)
+        self.dim = (pretrain_model.in_channels*pretrain_model.input_size**2 / self.batch_size) * th.ones((batch_size,)).reshape(-1, 1, 1, 1)
     
     
     def d_model(self, model, x, t, dxt):
@@ -25,7 +25,12 @@ class TrainLoop():
         out2 = out[0] + out[1]
         return out2
     
-    
+    def sample_t(self):
+        sigma_max = 80.*th.ones((self.batch_size,))
+        t = th.arctan(sigma_max/self.sigma_data)
+        return t
+        
+        
     def compute_g(self, model, xt, t, d_xt, r):
         g = -(th.cos(t)**2).view(-1,1,1,1)*(self.sigma_data * model(xt/self.sigma_data, t) - d_xt) - (r * th.cos(t)*th.sin(t)).view(-1,1,1,1)*(xt+ self.sigma_data*self.d_model(model=model,x=xt, t=t, dxt=d_xt))
         g = g.div(th.norm(g) + self.c)
