@@ -840,7 +840,7 @@ class ZigMa(nn.Module):
                 )
             )
         #print("m_init", m_init)
-        
+        self.logvar_linear = nn.Linear(self.embed_dim, 1)
         
     def convert_to_fp16(self):
         """
@@ -932,6 +932,7 @@ class ZigMa(nn.Module):
         hidden_states,
         t,
         y=None,
+        return_logvar=False
     ):
         """
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images),
@@ -945,7 +946,7 @@ class ZigMa(nn.Module):
         _B, _T, _D = hidden_states.shape
 
         
-        t = self.t_embedder(t)  # (N, D)
+        t = self.t_embedder(t.flatten())  # (N, D)
         if self.has_text:
             # y = self.y_embedder(y, self.training)  # (B, N, D)
             y = self.y_embedder(y)  # (B, N, D)
@@ -1005,7 +1006,9 @@ class ZigMa(nn.Module):
             hidden_states = self.unpatchify_video(hidden_states, self.video_frames)
         else:
             hidden_states = self.unpatchify(hidden_states)
-
+        if return_logvar:
+            logvar = self.logvar_linear(t)
+            return hidden_states, logvar
         return hidden_states
 
     #def forward_with_cfg(self, x, t, y, cfg_scale):

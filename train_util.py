@@ -1,4 +1,5 @@
 import torch as th
+import numpy as np
 
 
 def mean_flat(x):
@@ -9,16 +10,20 @@ def mean_flat(x):
 
 
 class TrainLoop():
-    def __init__(self, sigma_data, P_mean, P_std, pretrain_model, batch_size, c):
+    def __init__(self, sigma_data, P_mean, P_std, batch_size, c):
         self.sigma_data = sigma_data
         self.P_mean = P_mean
         self.P_std = P_std
-        self.pretrain = pretrain_model
         self.batch_size = batch_size
         self.c = c
-        self.dim = (pretrain_model.in_channels*pretrain_model.input_size**2 / self.batch_size) * th.ones((batch_size,)).reshape(-1, 1, 1, 1)
-    
-    
+  
+    def model_wrapper(self,scaled_x_t, t):
+        pred = self.avg_model(scaled_x_t, t.flatten(), return_logvar=False)
+        # If you want the model to be conditioned on class label (or anything else), just add it as an additional argument:
+        # You do not need to change anything else in the algorithm.
+        # pred, logvar = model(scaled_x_t, t.flatten(), class_label, return_logvar=True)
+        return pred
+            
     def d_model(self, model, x, t, dxt):
         tangent = th.cos(t) * th.sin(t) * self.sigma_data
         out = th.autograd.functional.jvp(model, (x/self.sigma_data, t), ((th.cos(t) * th.sin(t)).view(-1,1,1,1) * dxt, tangent))
@@ -31,53 +36,64 @@ class TrainLoop():
         return t
         
         
-    def compute_g(self, model, xt, t, d_xt, r):
-        g = -(th.cos(t)**2).view(-1,1,1,1)*(self.sigma_data * model(xt/self.sigma_data, t) - d_xt) - (r * th.cos(t)*th.sin(t)).view(-1,1,1,1)*(xt+ self.sigma_data*self.d_model(model=model,x=xt, t=t, dxt=d_xt))
-        g = g.div(th.norm(g) + self.c)
-        return g
+    def compute_g(self, avg_model, xt, t, dxt, r):
+        v_x = th.cos(t) * th.sin(t) * dxt / self.sigma_data
+        v_t = th.cos(t) * th.sin(t)
+        model, model_grad = th.autograd.functional.jvp(
+                avg_model,
+                (xt / self.sigma_data, t),
+                (v_x, v_t),
+        )
+        model_grad = model_grad.detach()
+        
+        g = -th.cos(t) * th.cos(t) * (self.sigma_data * model - dxt)
+        second_term = -r * (th.cos(t) * th.sin(t) * xt + self.sigma_data * model_grad)
+        g_norm = th.linalg.vector_norm(g, dim=(1, 2, 3), keepdim=True)
+        g_norm = g_norm * np.sqrt(g_norm.numel() / g.numel())  
+        g = g / (g_norm + 0.1)
+        g = g + second_term
+        return g, model
 
-    def compute_d_xt_distill(self, xt, t):
-        return self.sigma_data * self.pretrain(xt/self.sigma_data, t)
+    def compute_d_xt_distill(self, pretrain, xt, t):
+        return self.sigma_data * pretrain(xt/self.sigma_data, t)
     
     def compute_d_xt_train(self, x1, t, noise):
-        return th.cos(t).view(-1,1,1,1)*noise - th.sin(t).view(-1,1,1,1)*x1
+        return th.cos(t)*noise - th.sin(t)*x1
     
     def compute_t(self):
-        
-        tau = th.normal(mean=self.P_mean, std=self.P_std, size=(self.batch_size,))
-        t = th.arctan(tau.exp()/self.sigma_data)
-        return t
+        sigma = th.randn(self.batch_size).reshape(-1, 1, 1, 1)
+        sigma = (sigma * self.P_std + self.P_mean).exp()
+        weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
+        t = th.arctan(sigma/self.sigma_data)
+        return t, weight
     
-    def loss_fn(self, g,t,weight,train,teach):
-        w = weight(t)
-        l = w.exp() / self.dim.to(device=train.device)
-        l2 = mean_flat(l * (train - teach - g)**2 - w)
+    def loss_fn(self, g, logvar, train, teach, weight):
+        logvar = logvar.view(-1, 1, 1, 1)
+        l2 = (weight / logvar.exp())  * th.square(train - teach - g) + logvar
         return l2
        
-    def distill_loss(self, x1, r, model, avg_model, weight_fn):
-        t = self.compute_t().to(device=model.device)
-        noise = th.normal(mean=0.0, std=self.sigma_data, size=x1.shape).to(device=model.device)
-        xt = th.cos(t).view(-1,1,1,1) * x1 + th.sin(t).view(-1,1,1,1) * noise
-        dxt = self.compute_d_xt_distill(xt, t)
-        g = self.compute_g(avg_model, xt, t, dxt, r)
-        
-        model_out = model(xt/self.sigma_data, t)
-        avg_model_out = avg_model(xt/self.sigma_data, t)
-        
-        loss = self.loss_fn(g=g, t=t, weight=weight_fn, train=model_out, teach=avg_model_out)
+    def distill_loss(self, x1, r, model, avg_model, pretrain_model):
+        t, weight = self.compute_t()
+        t = t.to(device=x1.device)
+        weight = weight.to(device=x1.device)
+        noise = th.randn_like(x1) * self.sigma_data
+        xt = th.cos(t) * x1 + th.sin(t) * noise
+        dxt = self.compute_d_xt_distill(pretrain_model, xt, t)
+        model_out, logvar = model(xt/self.sigma_data, t.flatten(), return_logvar=True)
+        g, avg_model_out = self.compute_g(avg_model, xt, t, dxt, r)
+        loss = self.loss_fn(g=g, logvar=logvar, train=model_out, teach=avg_model_out, weight=weight)
         return loss
     
-    def train_loss(self, x1, r, model, avg_model, weight_fn):
-        t = self.compute_t().to(device=model.device)
-        noise = th.normal(mean=0.0, std=self.sigma_data, size=x1.shape).to(device=model.device)
-        xt = th.cos(t).view(-1,1,1,1) * x1 + th.sin(t).view(-1,1,1,1) * noise
+    def train_loss(self, x1, r, model, avg_model):
+        t, weight = self.compute_t()
+        t = t.to(device=x1.device)
+        weight = weight.to(device=x1.device)
+        noise = th.normal(mean=0.0, std=self.sigma_data, size=x1.shape).to(device=x1.device)
+        xt = th.cos(t) * x1 + th.sin(t) * noise
         dxt = self.compute_d_xt_train(x1, t, noise)
-        g = self.compute_g(avg_model, xt, t, dxt, r)
-        
-        model_out = model(xt/self.sigma_data, t)
-        avg_model_out = avg_model(xt/self.sigma_data, t)
-        
-        loss = self.loss_fn(g=g, t=t, weight=weight_fn, train=model_out, teach=avg_model_out)
+        model_out, logvar = model(xt/self.sigma_data, t.flatten(), return_logvar=True)
+        g, avg_model_out = self.compute_g(avg_model, xt, t, dxt, r)
+        loss = self.loss_fn(g=g, logvar=logvar, train=model_out, teach=avg_model_out, weight=weight)
         return loss
         
         

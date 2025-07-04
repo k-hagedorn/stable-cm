@@ -1,5 +1,7 @@
 import torch as th
+import torchvision
 import torch.distributed as dist
+from torchvision.transforms import v2
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from collections import OrderedDict
@@ -37,7 +39,7 @@ def create_logger(logging_dir):
 
 
 @th.no_grad()
-def update_ema(ema_model, model, decay=0.9999):
+def update_ema(ema_model, model, decay=0.95):
     """
     Step the EMA model towards the current model.
     """
@@ -64,7 +66,7 @@ def requires_grad(model, flag=True):
 def create_zigma(image_size, use_fp16=False):
     return ZigMa(
         in_channels=3,
-        embed_dim=256,
+        embed_dim=128,
         depth=12,
         img_dim=image_size,
         patch_size=2,
@@ -118,6 +120,9 @@ def norm(input, mean, std):
 def unnorm(input, mean, std):
     return (input / std) + mean
 
+
+
+
 def main(args):
     
     
@@ -137,10 +142,10 @@ def main(args):
     if rank == 0:
         os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
         experiment_index = len(glob(f"{args.results_dir}/*"))
-        model_string_name = "test"  # e.g., SiT-XL/2 --> SiT-XL-2 (for naming folders)
+        model_string_name = "sCM"  
         experiment_name = f"{experiment_index:03d}-{model_string_name}-"
-        experiment_dir = f"{args.results_dir}/{experiment_name}"  # Create an experiment folder
-        checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
+        experiment_dir = f"{args.results_dir}/{experiment_name}"  
+        checkpoint_dir = f"{experiment_dir}/checkpoints" 
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
@@ -155,36 +160,35 @@ def main(args):
     
     #setting up the models for CD
     #state_dict = find_model(args.ckpt_path)
-    #model = SiT_models[args.model](
-        #input_size=args.image_size,
-        #num_classes=args.num_classes
-    #)
+    
     model = create_zigma(args.image_size)
     pretrain_model = deepcopy(model).to(device)
     avg_model = deepcopy(model).to(device)
     
-    weight_fn = WeightFunc(128)
     
     #pretrain_model.load_state_dict(state_dict)
-    model = DDP(model.to(device), device_ids=[rank],find_unused_parameters=True)
-    weight_fn = DDP(weight_fn.to(device), device_ids=[rank],find_unused_parameters=True)
+    model = DDP(model.to(device), device_ids=[rank])
     
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
+    #vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     
-    opt = th.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
+    opt = th.optim.AdamW(model.parameters(), lr=3e-5, weight_decay=1e-2, betas=(0.9, 0.99))
     
-    dataset = ADTDataset(args.data_path, args.image_size)
+    transform = v2.Compose(
+            [v2.ToTensor(),
+            v2.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    
+    trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
+                                        download=True, transform=transform)
     train_fn = TrainLoop(
                 sigma_data=0.5,
                 P_mean=-0.8,
                 P_std=1.6,
-                pretrain_model=pretrain_model,
                 batch_size=local_batch_size,
                 c=0.1
     )
     
     
-    loader = DataLoader(dataset=dataset,
+    loader = DataLoader(dataset=trainset,
                         batch_size=local_batch_size,
                         shuffle=True,
                         num_workers=args.num_workers,
@@ -193,7 +197,6 @@ def main(args):
     )
     requires_grad(avg_model, False)
     update_ema(avg_model, model.module, decay=0)
-    weight_fn.train()
     model.train()
     avg_model.eval()
     pretrain_model.eval()
@@ -204,64 +207,64 @@ def main(args):
     mean = th.Tensor((1.56, -0.695, 0.483, 0.729)).reshape(1, -1, 1, 1)
     std = th.Tensor((0.5/5.27, 0.5/5.91, 0.5/4.21, 0.5/4.31)).reshape(1, -1, 1, 1)
     logger.info("Starting training")
-    latent_size = args.image_size // 8
-    zs = th.normal(mean=0.0, std=0.5, size=(local_batch_size,4,latent_size,latent_size)).to(device=model.device)
-    sample_t = train_fn.sample_t()
-    for i in loader:
+    latent_size = args.image_size
+    zs = th.normal(mean=0.0, std=0.5, size=(local_batch_size,3,latent_size,latent_size)).to(device)
+    sample_t = train_fn.sample_t().to(device)
+    
+    start_time = time()
+    for k in range(args.epochs):
         
-        x0 = []
-        x1 = i
-        x = x1[1]
-        x = x.to(device)
-        with th.no_grad():
-            # Map input images to latent space + normalize latents:
-            x1 = vae.encode(x1).latent_dist.sample()
-            x1 = norm(x1, mean, std)
-        r = min(1., iters/args.H)
-        with th.autograd.set_detect_anomaly(True):
-            loss = train_fn.train_loss(x1=x, r=r, model=model, avg_model=avg_model, weight_fn=weight_fn).mean()
+        for i in loader:
         
+            x1 = i
+            x = x1[0]
+            x = x.to(device)
+            #with th.no_grad():
+                # Map input images to latent space + normalize latents:
+                #x1 = vae.encode(x1).latent_dist.sample()
+                #x1 = norm(x1, mean, std)
+            r = min(1., iters/args.H)
+            loss = train_fn.train_loss(x1=x, r=r, model=model, avg_model=avg_model).mean()
+            opt.zero_grad()
             loss.backward()
             opt.step()
             update_ema(avg_model, model.module)
-            opt.zero_grad()
             
-        running_loss += loss.item()
-        log_steps += 1
-        train_steps += 1
-        if train_steps % args.log_every == 0:
+            running_loss += loss.item()
+            log_steps += 1
+            train_steps += 1
+            if train_steps % args.log_every == 0:
             # Measure training speed:
-            th.cuda.synchronize()
-            end_time = time()
-            steps_per_sec = log_steps / (end_time - start_time)
+                th.cuda.synchronize()
+                end_time = time()
+                steps_per_sec = log_steps / (end_time - start_time)
             # Reduce loss history over all processes:
-            avg_loss = th.tensor(running_loss / log_steps, device=device)
-            dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-            avg_loss = avg_loss.item() / dist.get_world_size()
-            logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
-            if args.wandb:
-                wandb_utils.log(
-                    { "train loss": avg_loss, "train steps/sec": steps_per_sec },
-                    step=train_steps
-                )
+                avg_loss = th.tensor(running_loss / log_steps, device=device)
+                dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
+                avg_loss = avg_loss.item() / dist.get_world_size()
+                logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                if args.wandb:
+                    wandb_utils.log(
+                        { "train loss": avg_loss, "train steps/sec": steps_per_sec },
+                        step=train_steps
+                    )
             # Reset monitoring variables:
-            running_loss = 0
-            log_steps = 0
-            start_time = time()
+                running_loss = 0
+                log_steps = 0
+                start_time = time()
         
-        if train_steps % args.sample_every == 0:
-                logger.info("Generating EMA samples...") # default to ode sampling
+            if train_steps % args.sample_every == 0 and train_steps > 0:
+                logger.info("Generating samples...") 
                 samples = avg_model(zs, sample_t)
                 dist.barrier()
-                samples = unnorm(samples, mean, std)
-                samples = vae.decode(samples).sample
+                #samples = unnorm(samples, mean, std)
+                #samples = vae.decode(samples).sample
                 out_samples = th.zeros((args.global_batch_size, 3, args.image_size, args.image_size), device=device)
                 dist.all_gather_into_tensor(out_samples, samples)
                 if args.wandb:
                     wandb_utils.log_image(out_samples, train_steps)
-                logging.info("Generating EMA samples done.")
+                logging.info("Generating samples done.")
             
-        print("completed iteration")
             
             
             
@@ -270,17 +273,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, default="results")
-    parser.add_argument("--model", type=str, choices=list(SiT_models.keys()), default="SiT-S/8")
     parser.add_argument("--image-size", type=int, default=128)
-    parser.add_argument("--steps", type=int, default=400000)
+    parser.add_argument("--epochs", type=int, default=4000)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
-    parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="mse")  
+    parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--H", type=int, default=10000)
-    parser.add_argument("--sample-every", type=int, default=2)
+    parser.add_argument("--H", type=int, default=5000)
+    parser.add_argument("--sample-every", type=int, default=5000)
     
     
     args = parser.parse_args()
