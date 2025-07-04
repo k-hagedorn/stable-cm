@@ -9,7 +9,7 @@ torchrun --nnodes=1 --nproc_per_node=1 train.py  --data-path /mnt/g/Dataset/data
 
 
 
-![Sample from sCM training from scratch at step 30000](samples_30000_91d9ab6387341ae16927.png)
-Sample from sCM training from scratch at step 30000
-![Sample from sCM training from scratch at step 205000](samples_205000_d5b640a265019faa4534.png)
-Sample from sCM training from scratch at step 205000
+|![Sample from sCM training from scratch at step 30000](samples_30000_91d9ab6387341ae16927.png)|![Sample from sCM training from scratch at step 205000](samples_205000_d5b640a265019faa4534.png)|
+|:--:| :--:| 
+|*Sample from sCM training from scratch at step 30000*|*Sample from sCM training from scratch at step 205000*|
+
