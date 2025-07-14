@@ -50,8 +50,9 @@ class TrainLoop():
         second_term = -r * th.cos(t) * th.sin(t) * (xt + self.sigma_data * model_grad)
         g_norm = th.linalg.vector_norm(g, dim=(1, 2, 3), keepdim=True)
         g_norm = g_norm * np.sqrt(g_norm.numel() / g.numel())  
-        g = g / (g_norm + 0.1)
         g = g + second_term
+        g = g / (g_norm + 0.1)
+        
         return g, model
 
     def compute_d_xt_distill(self, pretrain, xt, t):
