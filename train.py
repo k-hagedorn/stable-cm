@@ -255,7 +255,7 @@ def main(args):
         
             if train_steps % args.sample_every == 0 and train_steps > 0:
                 logger.info("Generating samples...") 
-                samples = avg_model(zs, sample_t)
+                samples = avg_model(zs/0.5, sample_t)
                 dist.barrier()
                 #samples = unnorm(samples, mean, std)
                 #samples = vae.decode(samples).sample
